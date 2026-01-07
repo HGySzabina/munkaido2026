@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Munkaidő-nyilvántartó Kitöltő</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; padding: 20px; }
+        .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 900px; }
+        h2 { color: #333; margin-bottom: 20px; border-bottom: 2px solid #007bff; padding-bottom: 10px; }
+        .preview-container { margin-top: 30px; overflow-x: auto; border: 1px solid #ddd; padding: 10px; display: none; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #ccc; padding: 8px; text-align: center; }
+        th { background-color: #f8f9fa; }
+        /* Szerkeszthető cellák jelzése */
+        td[contenteditable="true"] { background-color: #fffbe6; cursor: text; }
+        td[contenteditable="true"]:focus { outline: 2px solid #007bff; background-color: #fff; }
+        .loading { display: none; color: #007bff; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Munkaidő XLS Kitöltő</h2>
+
+    <div class="mb-3">
+        <label for="fileInput" class="form-label">1. XLS/XLSX Fájl feltöltése</label>
+        <input type="file" class="form-control" id="fileInput" accept=".xlsx, .xls">
+    </div>
+
+    <div class="mb-3">
+        <label class="form-label">2. Munka jellege</label>
+        <div>
+            <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="jobType" id="halfTime" value="half">
+                <label class="form-check-label" for="halfTime">Félállás (12:00)</label>
+            </div>
+            <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="jobType" id="fullTime" value="full" checked>
+                <label class="form-check-label" for="fullTime">Teljes állás (16:00)</label>
+            </div>
+        </div>
+    </div>
+
+    <div class="mb-3">
+        <label for="monthSelect" class="form-label">3. Hónap kiválasztása (Munkalap)</label>
+        <select class="form-select" id="monthSelect">
+            <option value="2026.01.">2026.01.</option>
+            <option value="2026.02.">2026.02.</option>
+            <option value="2026.03.">2026.03.</option>
+            <option value="2026.04.">2026.04.</option>
+            <option value="2026.05.">2026.05.</option>
+            <option value="2026.06.">2026.06.</option>
+            <option value="2026.07.">2026.07.</option>
+            <option value="2026.08.">2026.08.</option>
+            <option value="2026.09.">2026.09.</option>
+            <option value="2026.10.">2026.10.</option>
+            <option value="2026.11.">2026.11.</option>
+            <option value="2026.12.">2026.12.</option>
+        </select>
+    </div>
+
+    <div class="mb-3">
+        <label for="vacationDays" class="form-label">4. Szabadságos napok (pl. 2026.01.12, 2026.01.13)</label>
+        <input type="text" class="form-control" id="vacationDays" placeholder="YYYY.MM.DD formátum, vesszővel elválasztva több nap esetén">
+        <div class="form-text">Ha több nap van, vesszővel válaszd el őket.</div>
+    </div>
+
+    <button class="btn btn-primary w-100" onclick="processFile()">Előnézet Generálása</button>
+    <div id="loading" class="loading mt-2">Feldolgozás...</div>
+
+    <div class="preview-container" id="previewSection">
+        <h3>Előnézet</h3>
+        <p class="text-muted">Kattints a sárgás cellákba az értékek módosításához. A "Letöltés" gomb a táblázat jelenlegi állapotát menti el.</p>
+        <div id="tableContainer"></div>
+        <button class="btn btn-success w-100 mt-3" onclick="downloadFile()">Letöltés</button>
+    </div>
+</div>
+
+<script>
+    let workbook = null;
+    let selectedWorksheet = null;
+    let originalBuffer = null;
+    
+    // A módosítandó sorok indexeinek tárolása, hogy a mentésnél tudjuk, mit kell frissíteni
+    let modifiedRowsData = [];
+
+    async function processFile() {
+        const fileInput = document.getElementById('fileInput');
+        const file = fileInput.files[0];
+        const loading = document.getElementById('loading');
+        
+        if (!file) {
+            alert("Kérlek válassz ki egy fájlt!");
+            return;
+        }
+
+        loading.style.display = 'block';
+
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            originalBuffer = arrayBuffer; // Megtartjuk az eredetit referenciának (bár az ExcelJS újraépíti)
+            
+            workbook = new ExcelJS.Workbook();
+            await workbook.xlsx.load(arrayBuffer);
+
+            const selectedMonth = document.getElementById('monthSelect').value;
+            const jobType = document.querySelector('input[name="jobType"]:checked').value;
+            const vacationInput = document.getElementById('vacationDays').value;
+            
+            // Szabadságok tömbbe rendezése
+            const vacationDays = vacationInput.split(',').map(d => d.trim());
+
+            // Munkalap keresése (próbáljuk pontos egyezéssel, vagy szóköz nélküli egyezéssel)
+            selectedWorksheet = workbook.getWorksheet(selectedMonth) || workbook.getWorksheet(selectedMonth.replace(/\.$/, ''));
+
+            if (!selectedWorksheet) {
+                alert(`Nem található a "${selectedMonth}" nevű munkalap az Excelben!`);
+                loading.style.display = 'none';
+                return;
+            }
+
+            // Táblázat adatainak gyűjtése
+            modifiedRowsData = [];
+            
+            // Iterálás a sorokon. Feltételezzük, hogy a 7. sor (index 7) az első adat sor (fejléc a 6. sorban)
+            // Biztonsági okból végigmegyünk az első 40 soron a fejléc után.
+            selectedWorksheet.eachRow({ includeEmpty: true }, function(row, rowNumber) {
+                if (rowNumber <= 6) return; // Fejléc átugrása
+
+                const cellC = row.getCell(3); // C oszlop (Érkezés)
+                const cellE = row.getCell(5); // E oszlop (Távozás)
+                
+                // Háttérszín ellenőrzése
+                // ExcelJS-ben a fill tulajdonság egy objektum. Ha nincs fill, vagy type 'none', akkor nincs szín.
+                let hasColor = false;
+                if (cellC.fill && cellC.fill.type === 'pattern' && cellC.fill.fgColor) {
+                    // Ha van fgColor (előtérszín beállítva), akkor színezettnek tekintjük
+                    hasColor = true;
+                }
+
+                // Dátum ellenőrzése (Feltételezzük, hogy az 'A' oszlopban van a dátum, vagy a sor indexéből következtetünk)
+                // A legbiztosabb, ha megnézzük, hogy a szabadság input dátum szerepel-e a sorban valahol
+                let isVacation = false;
+                
+                // Dátum egyezés keresése a sorban (A vagy B oszlopban szokott lenni)
+                const cellA_Value = row.getCell(1).value;
+                const cellB_Value = row.getCell(2).value;
+                
+                // Segédfüggvény dátum stringgé alakításához
+                const checkDateMatch = (val) => {
+                    if (!val) return false;
+                    let strVal = val.toString();
+                    if (val instanceof Date) {
+                        strVal = val.toISOString().split('T')[0].replace(/-/g, '.'); // 2026.01.12 formátum
+                    }
+                    return vacationDays.some(vDay => strVal.includes(vDay) || (vDay.length > 0 && strVal.indexOf(vDay) > -1));
+                };
+
+                if (checkDateMatch(cellA_Value) || checkDateMatch(cellB_Value)) {
+                    isVacation = true;
+                }
+
+                // Logika végrehajtása
+                let valC = cellC.value;
+                let valE = cellE.value;
+
+                if (!hasColor) {
+                    // Munkana
+                    if (isVacation) {
+                        valC = "SZ";
+                        valE = "SZ";
+                    } else {
+                        // Normál munkanap
+                        valC = "8:00";
+                        valE = jobType === 'full' ? "16:00" : "12:00";
+                    }
+                    
+                    // Adatok tárolása a preview-hoz és későbbi íráshoz
+                    modifiedRowsData.push({
+                        rowNumber: rowNumber,
+                        colC: valC,
+                        colE: valE,
+                        originalRow: row // Referencia a stílusozáshoz
+                    });
+                }
+            });
+
+            renderPreviewTable();
+            document.getElementById('previewSection').style.display = 'block';
+
+        } catch (error) {
+            console.error(error);
+            alert("Hiba történt a fájl feldolgozása közben: " + error.message);
+        } finally {
+            loading.style.display = 'none';
+        }
+    }
+
+    function renderPreviewTable() {
+        const container = document.getElementById('tableContainer');
+        let html = '<table class="table table-bordered table-striped">';
+        html += '<thead><tr><th>Sor</th><th>Dátum (A/B oszlopból)</th><th>Érkezés (C oszlop)</th><th>Távozás (E oszlop)</th></tr></thead><tbody>';
+
+        modifiedRowsData.forEach((data, index) => {
+            // Megpróbáljuk kiolvasni a dátumot a tájékozódáshoz
+            let dateLabel = "";
+            try {
+                const cellA = selectedWorksheet.getRow(data.rowNumber).getCell(1).value;
+                dateLabel = cellA ? cellA.toString() : `Sor ${data.rowNumber}`;
+            } catch(e) { dateLabel = `Sor ${data.rowNumber}`; }
+
+            html += `<tr>
+                <td>${data.rowNumber}</td>
+                <td>${dateLabel}</td>
+                <td contenteditable="true" id="c-val-${index}">${data.colC}</td>
+                <td contenteditable="true" id="e-val-${index}">${data.colE}</td>
+            </tr>`;
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    }
+
+    async function downloadFile() {
+        if (!workbook || !selectedWorksheet) return;
+
+        // 1. Frissítjük a workbook adatait az előnézeti táblázat alapján
+        // (ha a felhasználó átírta az értékeket)
+        modifiedRowsData.forEach((data, index) => {
+            const htmlValC = document.getElementById(`c-val-${index}`).innerText;
+            const htmlValE = document.getElementById(`e-val-${index}`).innerText;
+
+            const row = selectedWorksheet.getRow(data.rowNumber);
+            const cellC = row.getCell(3);
+            const cellE = row.getCell(5);
+
+            cellC.value = htmlValC;
+            cellE.value = htmlValE;
+
+            // Stílus beállítása: Times New Roman, 13
+            const fontStyle = { name: 'Times New Roman', size: 13 };
+            
+            // Megtartjuk az eredeti stílusokat, csak a fontot írjuk felül
+            cellC.font = fontStyle;
+            cellE.font = fontStyle;
+        });
+
+        // 2. Mentés (Buffer generálása és letöltés)
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+        
+        // Eredeti fájlnév + _kitoltve
+        const originalName = document.getElementById('fileInput').files[0].name;
+        const newName = originalName.replace(/(\.[\w\d_-]+)$/i, '_kitoltve$1');
+        
+        saveAs(blob, newName);
+    }
+</script>
+
+</body>
+</html>
