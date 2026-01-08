@@ -201,6 +201,30 @@
         </div>`;
     }
 
+    // Hónapok sorkorlátjai
+    const monthRowLimits = {
+        '2026.01.': { start: 7, end: 37 },
+        '2026.02.': { start: 7, end: 34 },
+        '2026.03.': { start: 7, end: 37 },
+        '2026.04.': { start: 7, end: 36 },
+        '2026.05.': { start: 7, end: 37 },
+        '2026.06.': { start: 7, end: 36 },
+        '2026.07.': { start: 7, end: 37 },
+        '2026.08.': { start: 7, end: 37 },
+        '2026.09.': { start: 7, end: 36 },
+        '2026.10.': { start: 7, end: 37 },
+        '2026.11.': { start: 7, end: 36 },
+        '2026.12.': { start: 7, end: 37 }
+    };
+
+    // Ellenőrzi, hogy a cella üres-e (nincs benne szöveges tartalom)
+    function isCellEmpty(cell) {
+        const value = cell.value;
+        if (value === null || value === undefined) return true;
+        if (typeof value === 'string' && value.trim() === '') return true;
+        return false;
+    }
+
     async function processFile() {
         const fileInput = document.getElementById('fileInput');
         const file = fileInput.files[0];
@@ -248,19 +272,31 @@
                 return;
             }
 
+            // Sorkorlátok beállítása
+            const limits = monthRowLimits[selectedMonth];
+            if (!limits) {
+                showAlert(`Nem található sorkorlát a "${selectedMonth}" hónaphoz!`, "warning");
+                loading.style.display = 'none';
+                return;
+            }
+
             // Táblázat adatainak gyűjtése
             modifiedRowsData = [];
             let processedCount = 0;
+            let skippedCount = 0;
             
             selectedWorksheet.eachRow({ includeEmpty: true }, function(row, rowNumber) {
-                // Fejléc és üres sorok átugrása
-                if (rowNumber <= 6) return;
-                
-                // Maximum 50 sor feldolgozása
-                if (rowNumber > 56) return;
+                // Sorkorlát ellenőrzése
+                if (rowNumber < limits.start || rowNumber > limits.end) return;
 
                 const cellC = row.getCell(3); // C oszlop (Érkezés)
                 const cellE = row.getCell(5); // E oszlop (Távozás)
+                
+                // Ellenőrizzük, hogy üres-e mindkét cella
+                if (!isCellEmpty(cellC) || !isCellEmpty(cellE)) {
+                    skippedCount++;
+                    return; // Már van tartalom, kihagyjuk
+                }
                 
                 // Háttérszín ellenőrzése
                 const hasColor = hasCellBackground(cellC);
@@ -310,7 +346,11 @@
             if (processedCount === 0) {
                 showAlert("Nem találtam feldolgozható munkanapo(ka)t a kiválasztott munkalapon.", "warning");
             } else {
-                showAlert(`✅ ${processedCount} munkanap feldolgozva${vacationDays.length > 0 ? `, ${vacationDays.length} szabadság figyelembevételével` : ''}.`, "success");
+                let message = `✅ ${processedCount} munkanap feldolgozva${vacationDays.length > 0 ? `, ${vacationDays.length} szabadság figyelembevételével` : ''}.`;
+                if (skippedCount > 0) {
+                    message += `<br>ℹ️ ${skippedCount} sor kihagyva (már tartalmaztak adatot).`;
+                }
+                showAlert(message, "success");
             }
 
             renderPreviewTable();
