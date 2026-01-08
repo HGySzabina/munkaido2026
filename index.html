@@ -16,10 +16,10 @@
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         th, td { border: 1px solid #ccc; padding: 8px; text-align: center; }
         th { background-color: #f8f9fa; }
-        /* Szerkeszthető cellák jelzése */
         td[contenteditable="true"] { background-color: #fffbe6; cursor: text; }
         td[contenteditable="true"]:focus { outline: 2px solid #007bff; background-color: #fff; }
         .loading { display: none; color: #007bff; font-weight: bold; }
+        .alert { margin-top: 15px; }
     </style>
 </head>
 <body>
@@ -65,13 +65,16 @@
     </div>
 
     <div class="mb-3">
-        <label for="vacationDays" class="form-label">4. Szabadságos napok (pl. 2026.01.12, 2026.01.13)</label>
+        <label for="vacationDays" class="form-label">4. Szabadságos napok (opcionális)</label>
         <input type="text" class="form-control" id="vacationDays" placeholder="YYYY.MM.DD formátum, vesszővel elválasztva több nap esetén">
-        <div class="form-text">Ha több nap van, vesszővel válaszd el őket.</div>
+        <div class="form-text">Ha több nap van, vesszővel válaszd el őket. Pl: 2026.01.12, 2026.01.13</div>
+        <div class="form-text text-danger" id="dateWarning" style="display: none;"></div>
     </div>
 
     <button class="btn btn-primary w-100" onclick="processFile()">Előnézet Generálása</button>
     <div id="loading" class="loading mt-2">Feldolgozás...</div>
+    
+    <div id="alertContainer"></div>
 
     <div class="preview-container" id="previewSection">
         <h3>Előnézet</h3>
@@ -84,10 +87,119 @@
 <script>
     let workbook = null;
     let selectedWorksheet = null;
-    let originalBuffer = null;
-    
-    // A módosítandó sorok indexeinek tárolása, hogy a mentésnél tudjuk, mit kell frissíteni
     let modifiedRowsData = [];
+
+    // Dátum validálás
+    function validateDateFormat(dateStr) {
+        const pattern = /^\d{4}\.\d{2}\.\d{2}$/;
+        if (!pattern.test(dateStr)) {
+            return false;
+        }
+        
+        const parts = dateStr.split('.');
+        const year = parseInt(parts[0]);
+        const month = parseInt(parts[1]);
+        const day = parseInt(parts[2]);
+        
+        if (month < 1 || month > 12) return false;
+        if (day < 1 || day > 31) return false;
+        if (year < 2020 || year > 2030) return false;
+        
+        return true;
+    }
+
+    // Dátum normalizálás (Excel dátum vagy Date objektum -> YYYY.MM.DD string)
+    function normalizeDateToString(val) {
+        if (!val) return null;
+        
+        // Ha már string és jó formátumú
+        if (typeof val === 'string') {
+            const cleaned = val.trim();
+            if (/^\d{4}\.\d{2}\.\d{2}/.test(cleaned)) {
+                return cleaned.substring(0, 10); // Első 10 karakter: YYYY.MM.DD
+            }
+        }
+        
+        // Ha Date objektum
+        if (val instanceof Date) {
+            const year = val.getFullYear();
+            const month = String(val.getMonth() + 1).padStart(2, '0');
+            const day = String(val.getDate()).padStart(2, '0');
+            return `${year}.${month}.${day}`;
+        }
+        
+        // Ha Excel serial number (1900-01-01-től számított napok)
+        if (typeof val === 'number' && val > 0) {
+            const excelEpoch = new Date(1899, 11, 30);
+            const jsDate = new Date(excelEpoch.getTime() + val * 86400000);
+            const year = jsDate.getFullYear();
+            const month = String(jsDate.getMonth() + 1).padStart(2, '0');
+            const day = String(jsDate.getDate()).padStart(2, '0');
+            return `${year}.${month}.${day}`;
+        }
+        
+        return null;
+    }
+
+    // Cella színének ellenőrzése
+    function hasCellBackground(cell) {
+        if (!cell.fill) return false;
+        
+        // Pattern típusú kitöltés esetén
+        if (cell.fill.type === 'pattern') {
+            // Ellenőrizzük az előtérszínt
+            if (cell.fill.fgColor) {
+                const fg = cell.fill.fgColor;
+                // Ha van argb vagy theme, akkor színezett
+                if (fg.argb || (fg.theme !== undefined && fg.theme !== null)) {
+                    return true;
+                }
+            }
+            // Ellenőrizzük a háttérszínt
+            if (cell.fill.bgColor) {
+                const bg = cell.fill.bgColor;
+                if (bg.argb || (bg.theme !== undefined && bg.theme !== null)) {
+                    return true;
+                }
+            }
+        }
+        
+        // Gradient típusú kitöltés
+        if (cell.fill.type === 'gradient') {
+            return true;
+        }
+        
+        return false;
+    }
+
+    // Input figyelés a dátum mezőn
+    document.getElementById('vacationDays').addEventListener('input', function(e) {
+        const warning = document.getElementById('dateWarning');
+        const value = e.target.value.trim();
+        
+        if (!value) {
+            warning.style.display = 'none';
+            return;
+        }
+        
+        const dates = value.split(',').map(d => d.trim()).filter(d => d.length > 0);
+        const invalidDates = dates.filter(d => !validateDateFormat(d));
+        
+        if (invalidDates.length > 0) {
+            warning.textContent = `⚠️ Hibás formátum: ${invalidDates.join(', ')} - Használd: YYYY.MM.DD`;
+            warning.style.display = 'block';
+        } else {
+            warning.style.display = 'none';
+        }
+    });
+
+    function showAlert(message, type = 'danger') {
+        const container = document.getElementById('alertContainer');
+        container.innerHTML = `<div class="alert alert-${type} alert-dismissible fade show mt-3" role="alert">
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>`;
+    }
 
     async function processFile() {
         const fileInput = document.getElementById('fileInput');
@@ -95,74 +207,77 @@
         const loading = document.getElementById('loading');
         
         if (!file) {
-            alert("Kérlek válassz ki egy fájlt!");
+            showAlert("Kérlek válassz ki egy fájlt!");
             return;
         }
 
+        // Szabadság napok validálása
+        const vacationInput = document.getElementById('vacationDays').value.trim();
+        let vacationDays = [];
+        
+        if (vacationInput) {
+            const inputDates = vacationInput.split(',').map(d => d.trim()).filter(d => d.length > 0);
+            const invalidDates = inputDates.filter(d => !validateDateFormat(d));
+            
+            if (invalidDates.length > 0) {
+                showAlert(`❌ Hibás dátumformátum: ${invalidDates.join(', ')}<br>Használd a YYYY.MM.DD formátumot (pl: 2026.01.12)`);
+                return;
+            }
+            vacationDays = inputDates;
+        }
+
         loading.style.display = 'block';
+        document.getElementById('alertContainer').innerHTML = '';
 
         try {
             const arrayBuffer = await file.arrayBuffer();
-            originalBuffer = arrayBuffer; // Megtartjuk az eredetit referenciának (bár az ExcelJS újraépíti)
             
             workbook = new ExcelJS.Workbook();
             await workbook.xlsx.load(arrayBuffer);
 
             const selectedMonth = document.getElementById('monthSelect').value;
             const jobType = document.querySelector('input[name="jobType"]:checked').value;
-            const vacationInput = document.getElementById('vacationDays').value;
-            
-            // Szabadságok tömbbe rendezése
-            const vacationDays = vacationInput.split(',').map(d => d.trim());
 
-            // Munkalap keresése (próbáljuk pontos egyezéssel, vagy szóköz nélküli egyezéssel)
-            selectedWorksheet = workbook.getWorksheet(selectedMonth) || workbook.getWorksheet(selectedMonth.replace(/\.$/, ''));
+            // Munkalap keresése
+            selectedWorksheet = workbook.getWorksheet(selectedMonth) || 
+                               workbook.getWorksheet(selectedMonth.replace(/\.$/, ''));
 
             if (!selectedWorksheet) {
-                alert(`Nem található a "${selectedMonth}" nevű munkalap az Excelben!`);
+                showAlert(`Nem található a "${selectedMonth}" nevű munkalap az Excelben!`);
                 loading.style.display = 'none';
                 return;
             }
 
             // Táblázat adatainak gyűjtése
             modifiedRowsData = [];
+            let processedCount = 0;
             
-            // Iterálás a sorokon. Feltételezzük, hogy a 7. sor (index 7) az első adat sor (fejléc a 6. sorban)
-            // Biztonsági okból végigmegyünk az első 40 soron a fejléc után.
             selectedWorksheet.eachRow({ includeEmpty: true }, function(row, rowNumber) {
-                if (rowNumber <= 6) return; // Fejléc átugrása
+                // Fejléc és üres sorok átugrása
+                if (rowNumber <= 6) return;
+                
+                // Maximum 50 sor feldolgozása
+                if (rowNumber > 56) return;
 
                 const cellC = row.getCell(3); // C oszlop (Érkezés)
                 const cellE = row.getCell(5); // E oszlop (Távozás)
                 
                 // Háttérszín ellenőrzése
-                // ExcelJS-ben a fill tulajdonság egy objektum. Ha nincs fill, vagy type 'none', akkor nincs szín.
-                let hasColor = false;
-                if (cellC.fill && cellC.fill.type === 'pattern' && cellC.fill.fgColor) {
-                    // Ha van fgColor (előtérszín beállítva), akkor színezettnek tekintjük
-                    hasColor = true;
-                }
+                const hasColor = hasCellBackground(cellC);
 
-                // Dátum ellenőrzése (Feltételezzük, hogy az 'A' oszlopban van a dátum, vagy a sor indexéből következtetünk)
-                // A legbiztosabb, ha megnézzük, hogy a szabadság input dátum szerepel-e a sorban valahol
-                let isVacation = false;
-                
-                // Dátum egyezés keresése a sorban (A vagy B oszlopban szokott lenni)
+                // Dátum ellenőrzése az A és B oszlopban
                 const cellA_Value = row.getCell(1).value;
                 const cellB_Value = row.getCell(2).value;
                 
-                // Segédfüggvény dátum stringgé alakításához
-                const checkDateMatch = (val) => {
-                    if (!val) return false;
-                    let strVal = val.toString();
-                    if (val instanceof Date) {
-                        strVal = val.toISOString().split('T')[0].replace(/-/g, '.'); // 2026.01.12 formátum
-                    }
-                    return vacationDays.some(vDay => strVal.includes(vDay) || (vDay.length > 0 && strVal.indexOf(vDay) > -1));
-                };
-
-                if (checkDateMatch(cellA_Value) || checkDateMatch(cellB_Value)) {
-                    isVacation = true;
+                const dateA = normalizeDateToString(cellA_Value);
+                const dateB = normalizeDateToString(cellB_Value);
+                
+                let isVacation = false;
+                if (vacationDays.length > 0) {
+                    isVacation = vacationDays.some(vDay => 
+                        (dateA && dateA.startsWith(vDay)) || 
+                        (dateB && dateB.startsWith(vDay))
+                    );
                 }
 
                 // Logika végrehajtása
@@ -170,7 +285,7 @@
                 let valE = cellE.value;
 
                 if (!hasColor) {
-                    // Munkana
+                    // Munkanap (nincs színezve)
                     if (isVacation) {
                         valC = "SZ";
                         valE = "SZ";
@@ -180,22 +295,30 @@
                         valE = jobType === 'full' ? "16:00" : "12:00";
                     }
                     
-                    // Adatok tárolása a preview-hoz és későbbi íráshoz
+                    processedCount++;
+                    
+                    // Adatok tárolása
                     modifiedRowsData.push({
                         rowNumber: rowNumber,
                         colC: valC,
                         colE: valE,
-                        originalRow: row // Referencia a stílusozáshoz
+                        dateLabel: dateA || dateB || `Sor ${rowNumber}`
                     });
                 }
             });
+
+            if (processedCount === 0) {
+                showAlert("Nem találtam feldolgozható munkanapo(ka)t a kiválasztott munkalapon.", "warning");
+            } else {
+                showAlert(`✅ ${processedCount} munkanap feldolgozva${vacationDays.length > 0 ? `, ${vacationDays.length} szabadság figyelembevételével` : ''}.`, "success");
+            }
 
             renderPreviewTable();
             document.getElementById('previewSection').style.display = 'block';
 
         } catch (error) {
             console.error(error);
-            alert("Hiba történt a fájl feldolgozása közben: " + error.message);
+            showAlert("Hiba történt a fájl feldolgozása közben: " + error.message);
         } finally {
             loading.style.display = 'none';
         }
@@ -204,19 +327,12 @@
     function renderPreviewTable() {
         const container = document.getElementById('tableContainer');
         let html = '<table class="table table-bordered table-striped">';
-        html += '<thead><tr><th>Sor</th><th>Dátum (A/B oszlopból)</th><th>Érkezés (C oszlop)</th><th>Távozás (E oszlop)</th></tr></thead><tbody>';
+        html += '<thead><tr><th>Sor</th><th>Dátum</th><th>Érkezés (C oszlop)</th><th>Távozás (E oszlop)</th></tr></thead><tbody>';
 
         modifiedRowsData.forEach((data, index) => {
-            // Megpróbáljuk kiolvasni a dátumot a tájékozódáshoz
-            let dateLabel = "";
-            try {
-                const cellA = selectedWorksheet.getRow(data.rowNumber).getCell(1).value;
-                dateLabel = cellA ? cellA.toString() : `Sor ${data.rowNumber}`;
-            } catch(e) { dateLabel = `Sor ${data.rowNumber}`; }
-
             html += `<tr>
                 <td>${data.rowNumber}</td>
-                <td>${dateLabel}</td>
+                <td>${data.dateLabel}</td>
                 <td contenteditable="true" id="c-val-${index}">${data.colC}</td>
                 <td contenteditable="true" id="e-val-${index}">${data.colE}</td>
             </tr>`;
@@ -229,8 +345,7 @@
     async function downloadFile() {
         if (!workbook || !selectedWorksheet) return;
 
-        // 1. Frissítjük a workbook adatait az előnézeti táblázat alapján
-        // (ha a felhasználó átírta az értékeket)
+        // Frissítjük a workbook adatait az előnézeti táblázat alapján
         modifiedRowsData.forEach((data, index) => {
             const htmlValC = document.getElementById(`c-val-${index}`).innerText;
             const htmlValE = document.getElementById(`e-val-${index}`).innerText;
@@ -242,23 +357,20 @@
             cellC.value = htmlValC;
             cellE.value = htmlValE;
 
-            // Stílus beállítása: Times New Roman, 13
-            const fontStyle = { name: 'Times New Roman', size: 13 };
-            
-            // Megtartjuk az eredeti stílusokat, csak a fontot írjuk felül
-            cellC.font = fontStyle;
-            cellE.font = fontStyle;
+            // Stílus megtartása és font beállítása
+            cellC.font = { ...(cellC.font || {}), name: 'Times New Roman', size: 13 };
+            cellE.font = { ...(cellE.font || {}), name: 'Times New Roman', size: 13 };
         });
 
-        // 2. Mentés (Buffer generálása és letöltés)
+        // Mentés
         const buffer = await workbook.xlsx.writeBuffer();
         const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
         
-        // Eredeti fájlnév + _kitoltve
         const originalName = document.getElementById('fileInput').files[0].name;
         const newName = originalName.replace(/(\.[\w\d_-]+)$/i, '_kitoltve$1');
         
         saveAs(blob, newName);
+        showAlert(`✅ Fájl sikeresen letöltve: ${newName}`, "success");
     }
 </script>
 
